@@ -140,20 +140,21 @@ class CrosshairApp:
         except Exception:
             hwnd = ov.winfo_id()
 
+        inner_hwnd = ov.winfo_id()
         self._overlay_hwnd = hwnd
-        log_error(f"[overlay] hwnd={hwnd}, winfo_id={ov.winfo_id()}")
+        log_error(f"[overlay] frame_hwnd={hwnd}, inner_hwnd={inner_hwnd}")
 
-        # Win32 레이어드 윈도우 스타일 추가 (클릭 투과 + 포커스 없음)
-        style = windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-        style |= WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOPMOST
-        windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
+        # 두 HWND 모두에 스타일 적용 (wm_frame=외부창, winfo_id=내부 Tk위젯)
+        for h in set([hwnd, inner_hwnd]):
+            style = windll.user32.GetWindowLongW(h, GWL_EXSTYLE)
+            style |= WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOPMOST
+            windll.user32.SetWindowLongW(h, GWL_EXSTYLE, style)
+            windll.user32.SetWindowPos(
+                h, HWND_TOPMOST, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+            )
 
         self._apply_opacity()
-
-        windll.user32.SetWindowPos(
-            hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
-        )
 
         self._draw()
 
@@ -221,20 +222,20 @@ class CrosshairApp:
         self.canvas.create_line(x,        y + gap,   x,        y + size, **kw)
 
     def _keep_topmost(self):
-        """100ms마다 최상위 강제 유지 (tkinter + Win32 이중 보장)"""
+        """16ms마다 최상위 강제 유지 (tkinter + Win32 이중 보장)"""
         try:
-            # tkinter 레벨 topmost 재확인
             self.overlay.wm_attributes('-topmost', True)
         except Exception:
             pass
-        if self._overlay_hwnd:
-            try:
-                windll.user32.SetWindowPos(
-                    self._overlay_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
-                )
-            except Exception:
-                pass
+        for h in [self._overlay_hwnd, self.overlay.winfo_id()]:
+            if h:
+                try:
+                    windll.user32.SetWindowPos(
+                        h, HWND_TOPMOST, 0, 0, 0, 0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+                    )
+                except Exception:
+                    pass
         self.root.after(16, self._keep_topmost)
 
     # ── 설정창 ───────────────────────────────────────────────────────────────
