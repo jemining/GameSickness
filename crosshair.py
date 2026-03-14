@@ -40,16 +40,14 @@ except Exception as e:
 # ── Windows API ───────────────────────────────────────────────────────────────
 GWL_EXSTYLE       = -20
 WS_EX_LAYERED     = 0x00080000
-WS_EX_TRANSPARENT = 0x00000020
 WS_EX_NOACTIVATE  = 0x08000000
 WS_EX_TOPMOST     = 0x00000008
-LWA_COLORKEY      = 0x00000001
 LWA_ALPHA         = 0x00000002
 HWND_TOPMOST      = -1
 SWP_NOMOVE        = 0x0002
 SWP_NOSIZE        = 0x0001
 SWP_NOACTIVATE    = 0x0010
-TRANSPARENT_COLOR = 0x010101   # BGR #010101 — 투명 키 색상
+RGN_OR            = 2
 
 # ── 설정 ─────────────────────────────────────────────────────────────────────
 SETTINGS_PATH = os.path.join(os.path.expanduser('~'), '.3dmermy_crosshair.json')
@@ -111,6 +109,8 @@ class CrosshairApp:
         self.settings_win.deiconify()
         self.settings_win.lift()
 
+        self._running = True
+        threading.Thread(target=self._topmost_thread, daemon=True).start()
         self._keep_topmost()
 
     # ── 오버레이 ─────────────────────────────────────────────────────────────
@@ -140,38 +140,79 @@ class CrosshairApp:
         except Exception:
             hwnd = ov.winfo_id()
 
-        inner_hwnd = ov.winfo_id()
         self._overlay_hwnd = hwnd
-        log_error(f"[overlay] frame_hwnd={hwnd}, inner_hwnd={inner_hwnd}")
 
-        # 두 HWND 모두에 스타일 적용 (wm_frame=외부창, winfo_id=내부 Tk위젯)
-        for h in set([hwnd, inner_hwnd]):
-            style = windll.user32.GetWindowLongW(h, GWL_EXSTYLE)
-            style |= WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOPMOST
-            windll.user32.SetWindowLongW(h, GWL_EXSTYLE, style)
-            windll.user32.SetWindowPos(
-                h, HWND_TOPMOST, 0, 0, 0, 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
-            )
+        # WS_EX_TRANSPARENT 제거 — DWM이 이 창을 실제 불투명 창으로 인식하게 함
+        # → 게임의 Independent Flip(DWM 우회) 비활성화 → 오버레이가 게임 위에 표시됨
+        # 클릭 투과는 WS_EX_TRANSPARENT 대신 SetWindowRgn으로 처리
+        style = windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        style |= WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOPMOST
+        windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
+        windll.user32.SetWindowPos(
+            hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+        )
 
         self._apply_opacity()
 
         self._draw()
 
     def _apply_opacity(self):
-        """투명 키 색상 + 불투명도를 동시에 적용"""
+        """전체 불투명도 적용 (LWA_ALPHA만 사용 — 색상 키 불필요)"""
         if not self._overlay_hwnd:
             return
         alpha = max(1, min(255, int(self.s.get('opacity', 100) / 100 * 255)))
         try:
             windll.user32.SetLayeredWindowAttributes(
-                self._overlay_hwnd,
-                TRANSPARENT_COLOR,
-                alpha,
-                LWA_COLORKEY | LWA_ALPHA
+                self._overlay_hwnd, 0, alpha, LWA_ALPHA
             )
         except Exception as e:
             log_error(f"[SetLayeredWindowAttributes] {e}")
+
+    def _update_region(self):
+        """조준선 픽셀 영역만 클릭 통과 — SetWindowRgn으로 WS_EX_TRANSPARENT 대체.
+        DWM은 이 창을 불투명 창으로 인식 → 게임 Independent Flip 비활성화 → 오버레이 표시됨.
+        실제 조준선 외 영역은 region 밖이므로 클릭이 게임으로 통과.
+        """
+        if not self._overlay_hwnd:
+            return
+        s = self.s
+        t = max(1, int(s['thickness']))
+        pad = t // 2 + 2
+        cx, cy = self.sw // 2, self.sh // 2
+
+        rgn = windll.gdi32.CreateRectRgn(0, 0, 0, 0)
+
+        def add(x1, y1, x2, y2):
+            r = windll.gdi32.CreateRectRgn(
+                max(0, min(x1, x2) - pad),
+                max(0, min(y1, y2) - pad),
+                min(self.sw, max(x1, x2) + pad),
+                min(self.sh, max(y1, y2) + pad),
+            )
+            windll.gdi32.CombineRgn(rgn, rgn, r, RGN_OR)
+            windll.gdi32.DeleteObject(r)
+
+        if s.get('visible', True):
+            if s['show_center']:
+                sz  = int(s['center_size'])
+                gap = int(s['center_gap'])
+                add(cx - sz, cy, cx - gap, cy)
+                add(cx + gap, cy, cx + sz,  cy)
+                add(cx, cy - sz, cx, cy - gap)
+                add(cx, cy + gap, cx, cy + sz)
+                if s['center_dot']:
+                    ds = int(s['dot_size'])
+                    add(cx - ds, cy - ds, cx + ds, cy + ds)
+            if s['show_edges']:
+                esz = int(s['edge_size'])
+                m   = max(int(s['edge_margin']), esz + 5)
+                add(cx, m - esz,              cx, m + esz)
+                add(cx, self.sh - m - esz,    cx, self.sh - m + esz)
+                add(m - esz,          cy,     m + esz,         cy)
+                add(self.sw - m - esz, cy,    self.sw - m + esz, cy)
+
+        windll.user32.SetWindowRgn(self._overlay_hwnd, rgn, True)
 
     def _draw(self):
         self.canvas.delete('all')
@@ -180,6 +221,7 @@ class CrosshairApp:
         self._apply_opacity()
 
         if not self.s.get('visible', True):
+            self._update_region()
             return
 
         s  = self.s
@@ -214,6 +256,8 @@ class CrosshairApp:
             # 오른쪽: 가로선
             self.canvas.create_line(self.sw - m - esz, cy, self.sw - m + esz, cy, **kw)
 
+        self._update_region()
+
     def _cross(self, x, y, size, gap, color, width):
         kw = dict(fill=color, width=width)
         self.canvas.create_line(x - size, y,        x - gap,  y,        **kw)
@@ -221,22 +265,27 @@ class CrosshairApp:
         self.canvas.create_line(x,        y - size,  x,        y - gap,  **kw)
         self.canvas.create_line(x,        y + gap,   x,        y + size, **kw)
 
-    def _keep_topmost(self):
-        """16ms마다 최상위 강제 유지 (tkinter + Win32 이중 보장)"""
-        try:
-            self.overlay.wm_attributes('-topmost', True)
-        except Exception:
-            pass
-        for h in [self._overlay_hwnd, self.overlay.winfo_id()]:
-            if h:
+    def _topmost_thread(self):
+        """별도 스레드에서 1ms 간격으로 SetWindowPos 재확인 (게임 60fps 대응)"""
+        import time
+        while self._running:
+            if self._overlay_hwnd:
                 try:
                     windll.user32.SetWindowPos(
-                        h, HWND_TOPMOST, 0, 0, 0, 0,
+                        self._overlay_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
                     )
                 except Exception:
                     pass
-        self.root.after(16, self._keep_topmost)
+            time.sleep(0.001)
+
+    def _keep_topmost(self):
+        """500ms마다 tkinter topmost 재확인 (스레드가 Win32는 처리)"""
+        try:
+            self.overlay.wm_attributes('-topmost', True)
+        except Exception:
+            pass
+        self.root.after(500, self._keep_topmost)
 
     # ── 설정창 ───────────────────────────────────────────────────────────────
     def _build_settings_window(self):
@@ -355,6 +404,7 @@ class CrosshairApp:
         self.settings_win.withdraw()
 
     def _quit(self):
+        self._running = False
         save_settings(self.s)
         if self._tray:
             self._tray.stop()
