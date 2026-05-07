@@ -40,6 +40,7 @@ except Exception as e:
 # ── Windows API ───────────────────────────────────────────────────────────────
 GWL_EXSTYLE       = -20
 WS_EX_LAYERED     = 0x00080000
+WS_EX_TRANSPARENT = 0x00000020
 WS_EX_NOACTIVATE  = 0x08000000
 WS_EX_TOPMOST     = 0x00000008
 LWA_ALPHA         = 0x00000002
@@ -142,11 +143,11 @@ class CrosshairApp:
 
         self._overlay_hwnd = hwnd
 
-        # WS_EX_TRANSPARENT 제거 — DWM이 이 창을 실제 불투명 창으로 인식하게 함
-        # → 게임의 Independent Flip(DWM 우회) 비활성화 → 오버레이가 게임 위에 표시됨
-        # 클릭 투과는 WS_EX_TRANSPARENT 대신 SetWindowRgn으로 처리
+        # 오버레이는 표시만 하고 마우스 클릭은 뒤의 게임/앱으로 통과시킨다.
+        # SetWindowRgn은 그릴 영역을 조준선 픽셀로 제한하고,
+        # WS_EX_TRANSPARENT는 그 픽셀 위에서도 클릭을 먹지 않게 한다.
         style = windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-        style |= WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOPMOST
+        style |= WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOPMOST
         windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
         windll.user32.SetWindowPos(
             hwnd, HWND_TOPMOST, 0, 0, 0, 0,
@@ -170,9 +171,8 @@ class CrosshairApp:
             log_error(f"[SetLayeredWindowAttributes] {e}")
 
     def _update_region(self):
-        """조준선 픽셀 영역만 클릭 통과 — SetWindowRgn으로 WS_EX_TRANSPARENT 대체.
-        DWM은 이 창을 불투명 창으로 인식 → 게임 Independent Flip 비활성화 → 오버레이 표시됨.
-        실제 조준선 외 영역은 region 밖이므로 클릭이 게임으로 통과.
+        """조준선 픽셀 영역만 창 region으로 남겨 배경 전체가 가려지지 않게 한다.
+        실제 클릭 통과는 WS_EX_TRANSPARENT 확장 스타일에서 처리한다.
         """
         if not self._overlay_hwnd:
             return
